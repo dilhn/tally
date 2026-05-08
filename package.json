@@ -1,0 +1,25 @@
+{
+  "name": "tally",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend",
+    "tests"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=frontend",
+    "build:frontend": "npm run build --workspace=frontend",
+    "build:backend": "npm run build --workspace=backend",
+    "test": "npm run test --workspace=tests",
+    "test:ui": "npm run test:ui --workspace=tests",
+    "test:api": "npm run test:api --workspace=tests",
+    "newman": "newman run postman/tally.postman_collection.json -e postman/tally.postman_environment.json --reporters cli,htmlextra --reporter-htmlextra-export newman-report/report.html",
+    "lint": "npm run lint --workspace=frontend && npm run lint --workspace=backend"
+  },
+  "devDependencies": {
+    "newman": "^6.2.1",
+    "newman-reporter-htmlextra": "^1.23.1",
+    "prettier": "^3.0.0"
+  }
+}
