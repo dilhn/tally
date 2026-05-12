@@ -38,7 +38,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci
+      - run: npm install
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
         working-directory: tests
@@ -62,7 +62,7 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
-      - run: npm ci
+      - run: npm install
       - name: Build frontend
         run: npm run build:frontend
       - name: Upload build artifact
