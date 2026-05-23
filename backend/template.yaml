@@ -4,7 +4,9 @@ Description: Tally — bills & expenses tracker backend
 
 Globals:
   Function:
-    Runtime: nodejs20.x
+    Runtime: nodejs22.x
+    Architectures:
+      - arm64
     Timeout: 10
     MemorySize: 256
     Environment:
