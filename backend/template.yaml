@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Tally — application stack (API + frontend hosting)
+Description: Tally - application stack (API + frontend hosting)
 
 Globals:
   Function:
@@ -83,7 +83,7 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
-        Comment: !Sub "${AWS::StackName} — Tally frontend"
+        Comment: !Sub "${AWS::StackName} - Tally frontend"
         DefaultRootObject: index.html
         PriceClass: PriceClass_100
         HttpVersion: http2
@@ -140,3 +140,6 @@ Outputs:
   FrontendBucketName:
     Description: S3 bucket name for the Tally frontend
     Value: !Ref FrontendBucket
+  FrontendDistributionId:
+    Description: CloudFront distribution ID (consumed by the pipeline's frontend deploy)
+    Value: !Ref FrontendDistribution

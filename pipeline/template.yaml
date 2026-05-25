@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Tally pipeline - CodePipeline orchestrating CloudFormation deploy of the
+  tally-app stack and a CodeBuild-driven frontend deploy. Deployed manually
+  once via the tally-deployer user (chicken-and-egg with the GHA OIDC role).
+
+Parameters:
+  AppStackName:
+    Type: String
+    Default: tally-app
+    Description: Name of the application stack this pipeline updates.
+  SourceObjectKey:
+    Type: String
+    Default: source.zip
+    Description: Object key (in ArtifactBucket) for the GHA-uploaded source bundle.
+  PackagedTemplateKey:
+    Type: String
+    Default: backend-packaged.yaml
+    Description: Path within source.zip to the sam-packaged backend template.
+
+Resources:
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireNoncurrentVersions
+            Status: Enabled
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+          - Id: AbortIncompleteMultipart
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  CloudFormationDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-cfn-deploy"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppStackDeploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ReadPackagedArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: ListArtifactBucket
+                Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt ArtifactBucket.Arn
+              - Sid: ManageAppResources
+                Effect: Allow
+                Action:
+                  - lambda:*
+                  - apigateway:*
+                  - cloudfront:*
+                  - s3:*
+                  - logs:*
+                  - cloudformation:*
+                Resource: '*'
+              - Sid: ManageAppIamRoles
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:PassRole
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:TagRole
+                  - iam:UntagRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/${AppStackName}-*"
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-codebuild"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: FrontendDeploy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"
+              - Sid: ReadSourceArtifact
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: ReadAppStackOutputs
+                Effect: Allow
+                Action:
+                  - cloudformation:DescribeStacks
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*"
+              - Sid: SyncFrontendBucket
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub "arn:aws:s3:::${AppStackName}-frontendbucket-*"
+                  - !Sub "arn:aws:s3:::${AppStackName}-frontendbucket-*/*"
+              - Sid: InvalidateCloudFront
+                Effect: Allow
+                Action:
+                  - cloudfront:CreateInvalidation
+                  - cloudfront:GetInvalidation
+                  - cloudfront:ListDistributions
+                Resource: '*'
+
+  FrontendDeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${AWS::StackName}-frontend-deploy"
+      Description: Builds the Next.js frontend, syncs to S3, invalidates CloudFront.
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: pipeline/buildspec.yml
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/amazonlinux-x86_64-standard:5.0
+        EnvironmentVariables:
+          - Name: APP_STACK_NAME
+            Value: !Ref AppStackName
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+      TimeoutInMinutes: 15
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-pipeline"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PipelineOrchestration
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ArtifactStoreAccess
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub "${ArtifactBucket.Arn}/*"
+              - Sid: PassCloudFormationDeployRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt CloudFormationDeployRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: cloudformation.amazonaws.com
+              - Sid: CloudFormationDeployActions
+                Effect: Allow
+                Action:
+                  - cloudformation:CreateStack
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:GetTemplate
+                  - cloudformation:GetTemplateSummary
+                  - cloudformation:SetStackPolicy
+                  - cloudformation:ValidateTemplate
+                Resource: !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AppStackName}/*"
+              - Sid: RunFrontendCodeBuild
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StopBuild
+                Resource: !GetAtt FrontendDeployProject.Arn
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub "${AWS::StackName}"
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      RestartExecutionOnUpdate: false
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceFromS3
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !Ref ArtifactBucket
+                S3ObjectKey: !Ref SourceObjectKey
+                PollForSourceChanges: 'false'
+              OutputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+        - Name: DeployBackend
+          Actions:
+            - Name: CloudFormationDeploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                StackName: !Ref AppStackName
+                TemplatePath: !Sub "SourceOutput::${PackagedTemplateKey}"
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !GetAtt CloudFormationDeployRole.Arn
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+        - Name: DeployFrontend
+          Actions:
+            - Name: BuildAndSync
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref FrontendDeployProject
+              InputArtifacts:
+                - Name: SourceOutput
+              RunOrder: 1
+
+Outputs:
+  ArtifactBucketName:
+    Description: S3 bucket where GHA uploads source.zip and where SAM-packaged Lambda code lives.
+    Value: !Ref ArtifactBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketName"
+  ArtifactBucketArn:
+    Description: ARN of the artifact bucket (for use in the GHA role inline policy).
+    Value: !GetAtt ArtifactBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-ArtifactBucketArn"
+  PipelineName:
+    Description: CodePipeline name.
+    Value: !Ref Pipeline
+    Export:
+      Name: !Sub "${AWS::StackName}-PipelineName"
+  PipelineArn:
+    Description: CodePipeline ARN (for use in the GHA role inline policy).
+    Value: !Sub "arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Pipeline}"
+    Export:
+      Name: !Sub "${AWS::StackName}-PipelineArn"
+  CloudFormationDeployRoleArn:
+    Description: Role assumed by the CloudFormation deploy action.
+    Value: !GetAtt CloudFormationDeployRole.Arn

@@ -1,0 +1,50 @@
+version: 0.2
+
+env:
+  variables:
+    NPM_CONFIG_FUND: 'false'
+    NPM_CONFIG_AUDIT: 'false'
+
+phases:
+  install:
+    runtime-versions:
+      nodejs: 22
+    commands:
+      - node --version
+      - npm --version
+      - aws --version
+
+  pre_build:
+    commands:
+      - echo "Resolving frontend bucket and CloudFront distribution from $APP_STACK_NAME outputs..."
+      - |
+        FRONTEND_BUCKET=$(aws cloudformation describe-stacks \
+          --stack-name "$APP_STACK_NAME" \
+          --query "Stacks[0].Outputs[?OutputKey=='FrontendBucketName'].OutputValue" \
+          --output text)
+      - |
+        DISTRIBUTION_ID=$(aws cloudformation describe-stacks \
+          --stack-name "$APP_STACK_NAME" \
+          --query "Stacks[0].Outputs[?OutputKey=='FrontendDistributionId'].OutputValue" \
+          --output text)
+      - test -n "$FRONTEND_BUCKET" || (echo "FrontendBucketName output not found on $APP_STACK_NAME" && exit 1)
+      - test -n "$DISTRIBUTION_ID" || (echo "FrontendDistributionId output not found on $APP_STACK_NAME" && exit 1)
+      - echo "FRONTEND_BUCKET=$FRONTEND_BUCKET"
+      - echo "DISTRIBUTION_ID=$DISTRIBUTION_ID"
+      - npm ci
+
+  build:
+    commands:
+      - npm run build:frontend
+      - test -f frontend/out/index.html || (echo "frontend/out/index.html missing after build" && exit 1)
+
+  post_build:
+    commands:
+      - aws s3 sync frontend/out/ "s3://$FRONTEND_BUCKET/" --delete
+      - |
+        INVALIDATION_ID=$(aws cloudfront create-invalidation \
+          --distribution-id "$DISTRIBUTION_ID" \
+          --paths "/*" \
+          --query 'Invalidation.Id' \
+          --output text)
+      - echo "Invalidation $INVALIDATION_ID submitted for distribution $DISTRIBUTION_ID"
